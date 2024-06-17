@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
@@ -68,4 +69,91 @@ func TestSanitizeStatement_PersistValues(t *testing.T) {
 	assert.NotEqual(t, statement2, sanitizedStatement2)
 	assert.Equal(t, -1, strings.Index(sanitizedStatement2, "abc123@somedomain.com"))
 	assert.NotEqual(t, -1, strings.Index(sanitizedStatement2, persistedValues["abc123@somedomain.com"]))
+}
+
+func TestGetNewJsonValue(t *testing.T) {
+	var val = "{\"City\": \"Neuchatel\", \"TaxId\": \"SE123123-ABC\", \"Region\": \"\", \"PostalCode\": \"2000\", \"CompanyName\": \"MF Company Ltd\", \"AddressLine1\": \"Street1\"}"
+	newVal := GetNewJsonValue(val, &[]string{"City", "TaxId"})
+
+	assert.NotEqual(t, val, newVal)
+
+	var anyJson map[string]interface{}
+	err := json.Unmarshal([]byte(newVal), &anyJson)
+
+	assert.Nil(t, err)
+
+	tid, ok := anyJson["TaxId"]
+	assert.True(t, ok)
+	assert.NotEqual(t, "SE123123-ABC", tid)
+
+	city, ok := anyJson["City"]
+	assert.True(t, ok)
+	assert.NotEqual(t, "NEUCHATEL", city)
+}
+
+func TestSanitizeStatement_JsonColumn(t *testing.T) {
+	var statement = "39157	VQ27nQc@lJSjn16.com	8gqVYW-y4b	t	2024-03-26 19:50:22.14547+00	t	f	f	0	{\"City\": \"Neuchatel\", \"TaxId\": \"SE123123-ABC\", \"Region\": \"\", \"PostalCode\": \"2000\", \"CompanyName\": \"MF Company Ltd\", \"AddressLine1\": \"Street1\"}	email@domain.com	Person Personsson	nz0RVJjlbBJpQ7BjUrOUxHpk3TbnygoXdPhgFcIWUdc=	\\x56722f8983026de83d0d3f13a32c7053	\\N	\\N	2018-08-23 08:58:18+00	2024-03-26 19:54:59.498137+00	{efb2f51b-6dd3-4248-815e-71b5ee9626aa}"
+	var columns = []ColumnInfo{
+		{
+			Name:    "CompanyInfo",
+			Persist: false,
+			Type:    JsonColType,
+			Keys: &[]string{
+				"CompanyName",
+				"TaxId",
+			},
+		},
+	}
+
+	sanitizedStatement := SanitizeStatement(statement, &columns, []string{"Id", "Email", "ScreenName", "Verified", "LastLogin", "OptIn", "Deleted", "IsAdmin", "CreatedFrom", "CompanyInfo", "NewEmail", "FirstName", "LastName", "PasswordHash", "Salt", "OldPasswordHash", "ResetPasswordSecret", "Created", "LastUpdated", "VerificationSecrets"}, map[string]string{})
+
+	assert.NotEqual(t, sanitizedStatement, statement)
+	assert.Equal(t, -1, strings.Index(sanitizedStatement, "SE123123-ABC"), "Make sure tax id is removed")
+	assert.Equal(t, -1, strings.Index(sanitizedStatement, "MF Company Ltd"), "Make sure tax id is removed")
+
+	values := strings.Split(sanitizedStatement, "\t")
+	j := values[9]
+
+	var anyJson map[string]interface{}
+	err := json.Unmarshal([]byte(j), &anyJson)
+
+	assert.Nil(t, err)
+	assert.NotEqual(t, "SE123123-ABC", anyJson["TaxId"])
+	assert.NotEqual(t, "MF Company Ltd", anyJson["CompanyName"])
+}
+
+func TestSanitizeStatement_TextArrayColumn(t *testing.T) {
+	var statement = "39157	VQ27nQc@lJSjn16.com	8gqVYW-y4b	t	2024-03-26 19:50:22.14547+00	t	f	f	0	{abc123,untzxxx123}	email@domain.com	Person Personsson	nz0RVJjlbBJpQ7BjUrOUxHpk3TbnygoXdPhgFcIWUdc=	\\x56722f8983026de83d0d3f13a32c7053	\\N	\\N	2018-08-23 08:58:18+00	2024-03-26 19:54:59.498137+00	{efb2f51b-6dd3-4248-815e-71b5ee9626aa}"
+	var columns = []ColumnInfo{
+		{
+			Name:    "CompanyInfo",
+			Persist: true,
+			Type:    TextArrayColType,
+		},
+	}
+	var persistedValues = map[string]string{
+		"abc123": "glurg",
+	}
+
+	sanitizedStatement := SanitizeStatement(statement, &columns, []string{"Id", "Email", "ScreenName", "Verified", "LastLogin", "OptIn", "Deleted", "IsAdmin", "CreatedFrom", "CompanyInfo", "NewEmail", "FirstName", "LastName", "PasswordHash", "Salt", "OldPasswordHash", "ResetPasswordSecret", "Created", "LastUpdated", "VerificationSecrets"}, persistedValues)
+
+	assert.NotEqual(t, sanitizedStatement, statement)
+	assert.Equal(t, -1, strings.Index(sanitizedStatement, "abc123"))
+	assert.Equal(t, -1, strings.Index(sanitizedStatement, "untzxxx123"))
+	assert.True(t, strings.Index(sanitizedStatement, "glurg") > -1)
+}
+
+func TestTextArrayColumn(t *testing.T) {
+	var text = "{abc123,untzxxx123}"
+	var persistedValues = map[string]string{
+		"abc123": "glurg",
+	}
+	var newValue = GetNewTextArrayValue(text, true, persistedValues)
+
+	assert.NotEqual(t, text, newValue)
+	assert.Equal(t, -1, strings.Index(newValue, "abc123"))
+	assert.NotEqual(t, -1, strings.Index(newValue, "glurg"))
+	assert.Equal(t, -1, strings.Index(newValue, "untzxxx123"))
+	assert.Equal(t, "{", string([]rune(newValue)[0]))
+	assert.Equal(t, "}", string([]rune(newValue)[len(newValue)-1]))
 }

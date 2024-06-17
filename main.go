@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
@@ -57,14 +58,74 @@ func GenerateRandomString(length int) string {
 	return string(ret)
 }
 
-func GetNewValue(isEmail bool) string {
+func GetNewValue(isEmail bool, length int) string {
 	if isEmail {
 		return fmt.Sprintf("%s@%s.com", GenerateRandomString(7), GenerateRandomString(7))
 	} else {
-		return GenerateRandomString(10)
+		return GenerateRandomString(length)
 	}
 }
 
+func GetNewJsonValue(value string, keys *[]string) string {
+	if keys == nil || len(*keys) == 0 {
+		return "\\N"
+	}
+
+	var anyJson map[string]interface{}
+	err := json.Unmarshal([]byte(value), &anyJson)
+
+	if err != nil {
+		log.Fatalf("Error parsing json: %v", err)
+	}
+
+	for _, key := range *keys {
+		_, ok := anyJson[key]
+
+		if ok {
+			anyJson[key] = GetNewValue(false, 10)
+		}
+	}
+
+	bytes, err := json.Marshal(anyJson)
+
+	if err != nil {
+		log.Fatalf("Error serializing to json: %v", err)
+	}
+
+	return string(bytes)
+}
+
+func GetNewTextArrayValue(value string, persistValues bool, persistedValues map[string]string) string {
+	val := strings.Trim(value, "{")
+	val = strings.Trim(val, "}")
+	vals := strings.Split(val, ",")
+	result := "{"
+
+	for _, v := range vals {
+		if persistValues {
+			x, ok := persistedValues[v]
+
+			if !ok {
+				x = GetNewValue(false, len(v))
+				persistedValues[v] = x
+			}
+
+			result += x + ","
+		} else {
+			result += GetNewValue(false, len(v))
+			result += ","
+		}
+	}
+
+	result = strings.Trim(result, ",")
+	result += "}"
+
+	return result
+}
+
+// SanitizeStatement Sanitize values in a copy statement from a pg-dump.
+// Pass the statement, info about how and which column values should be replaced, names of the columns taken from the
+// first line of the copy statement and a map of previously persisted values.
 func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames []string, persistedValues map[string]string) string {
 	values := strings.Split(statement, "\t")
 	var result = make([]string, len(values))
@@ -81,18 +142,23 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 
 		for _, info := range *columnInfos {
 			if info.Name == colName {
-
-				if info.Persist {
-					persistedValue, persisted := persistedValues[val]
-
-					if persisted {
-						newVal = persistedValue
-					} else {
-						newVal = GetNewValue(info.Type == EmailColType)
-						persistedValues[val] = newVal
-					}
+				if info.Type == JsonColType {
+					newVal = GetNewJsonValue(val, info.Keys)
+				} else if info.Type == TextArrayColType {
+					newVal = GetNewTextArrayValue(val, info.Persist, persistedValues)
 				} else {
-					newVal = GetNewValue(info.Type == EmailColType)
+					if info.Persist {
+						persistedValue, persisted := persistedValues[val]
+
+						if persisted {
+							newVal = persistedValue
+						} else {
+							newVal = GetNewValue(info.Type == EmailColType, len(val))
+							persistedValues[val] = newVal
+						}
+					} else {
+						newVal = GetNewValue(info.Type == EmailColType, len(val))
+					}
 				}
 
 				break
@@ -110,14 +176,17 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 }
 
 const (
-	EmailColType string = "email"
-	TextColType  string = "text"
+	EmailColType     string = "email"
+	TextColType      string = "text"
+	JsonColType      string = "json"
+	TextArrayColType string = "text_array"
 )
 
 type ColumnInfo struct {
 	Name    string
 	Type    string
 	Persist bool
+	Keys    *[]string
 }
 
 func main() {
@@ -144,6 +213,60 @@ func main() {
 				Name:    "ScreenName",
 				Persist: false,
 				Type:    TextColType,
+			},
+			ColumnInfo{
+				Name:    "CompanyInfo",
+				Persist: false,
+				Type:    JsonColType,
+				Keys: &[]string{
+					"TaxId",
+					"PostalCode",
+					"CompanyName",
+					"AddressLine1",
+				},
+			},
+		},
+		"public.\"LicenseKeys\"": {
+			ColumnInfo{
+				Name:    "Key",
+				Persist: true,
+				Type:    TextColType,
+			},
+		},
+		"public.\"Orders\"": {
+			ColumnInfo{
+				Name:    "Email",
+				Persist: true,
+				Type:    EmailColType,
+			},
+			ColumnInfo{
+				Name:    "TaxId",
+				Persist: true,
+				Type:    TextColType,
+			},
+			ColumnInfo{
+				Name:    "RecipientEmail",
+				Persist: true,
+				Type:    EmailColType,
+			},
+		},
+		"public.\"Subscriptions\"": {
+			ColumnInfo{
+				Name:    "Email",
+				Persist: true,
+				Type:    EmailColType,
+			},
+			ColumnInfo{
+				Name:    "TaxId",
+				Persist: true,
+				Type:    TextColType,
+			},
+		},
+		"public.\"TransferRequests\"": {
+			ColumnInfo{
+				Name:    "Keys",
+				Persist: true,
+				Type:    TextArrayColType,
 			},
 		},
 	}
