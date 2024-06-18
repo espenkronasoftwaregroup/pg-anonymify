@@ -2,13 +2,14 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/big"
+	"math/rand"
 	"os"
 	"strings"
+	"time"
+	"unsafe"
 )
 
 func GetTableNameFromStatement(statement string) string {
@@ -44,18 +45,32 @@ func GetColumnNames(copyStatement string) []string {
 	return result
 }
 
-func GenerateRandomString(length int) string {
-	const letters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-"
-	ret := make([]byte, length)
-	for i := 0; i < length; i++ {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-		if err != nil {
-			log.Fatalf("Error generating random number: %v", err)
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
+// https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-go
+var src = rand.NewSource(time.Now().UnixNano())
+
+func GenerateRandomString(n int) string {
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
 		}
-		ret[i] = letters[num.Int64()]
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
 	}
 
-	return string(ret)
+	return *(*string)(unsafe.Pointer(&b))
 }
 
 func GetNewValue(isEmail bool, length int) string {
@@ -127,14 +142,14 @@ func GetNewTextArrayValue(value string, persistValues bool, persistedValues map[
 // Pass the statement, info about how and which column values should be replaced, names of the columns taken from the
 // first line of the copy statement and a map of previously persisted values.
 func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames []string, persistedValues map[string]string) string {
-	values := strings.Split(statement, "\t")
-	var result = make([]string, len(values))
+	columnValue := strings.Split(statement, "\t")
+	var result = make([]string, len(columnValue))
 
-	for i, val := range values {
+	for i, val := range columnValue {
 		newVal := ""
 		colName := columnNames[i]
 
-		// null values can be ignored
+		// null columnValue can be ignored
 		if val == "\\N" {
 			result[i] = val
 			continue
@@ -142,6 +157,12 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 
 		for _, info := range *columnInfos {
 			if info.Name == colName {
+
+				valLen := len(val)
+				if info.MaxLength > 0 && valLen > info.MaxLength {
+					valLen = info.MaxLength
+				}
+
 				if info.Type == JsonColType {
 					newVal = GetNewJsonValue(val, info.Keys)
 				} else if info.Type == TextArrayColType {
@@ -149,15 +170,28 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 				} else {
 					if info.Persist {
 						persistedValue, persisted := persistedValues[val]
-
 						if persisted {
 							newVal = persistedValue
 						} else {
-							newVal = GetNewValue(info.Type == EmailColType, len(val))
+							newVal = GetNewValue(info.Type == EmailColType, valLen)
 							persistedValues[val] = newVal
 						}
 					} else {
-						newVal = GetNewValue(info.Type == EmailColType, len(val))
+						newVal = GetNewValue(info.Type == EmailColType, valLen)
+					}
+				}
+
+				// check if org value have a suffix that we want to keep
+				if info.Suffixes != nil && len(*info.Suffixes) > 0 {
+					for _, suffix := range *info.Suffixes {
+						if strings.HasSuffix(val, suffix) {
+							newVal = newVal[0:len(newVal)-len(suffix)] + suffix
+							if info.Persist {
+								persistedValues[val] = newVal
+							}
+
+							break
+						}
 					}
 				}
 
@@ -183,10 +217,12 @@ const (
 )
 
 type ColumnInfo struct {
-	Name    string
-	Type    string
-	Persist bool
-	Keys    *[]string
+	Name      string
+	Type      string
+	Persist   bool
+	Keys      *[]string
+	Suffixes  *[]string
+	MaxLength int
 }
 
 func main() {
@@ -210,9 +246,10 @@ func main() {
 				Type:    EmailColType,
 			},
 			ColumnInfo{
-				Name:    "ScreenName",
-				Persist: false,
-				Type:    TextColType,
+				Name:      "ScreenName",
+				Persist:   false,
+				Type:      TextColType,
+				MaxLength: 64,
 			},
 			ColumnInfo{
 				Name:    "CompanyInfo",
@@ -231,6 +268,12 @@ func main() {
 				Name:    "Key",
 				Persist: true,
 				Type:    TextColType,
+				Suffixes: &[]string{
+					"-TRIAL",
+					"-NFR",
+					"-BETA",
+					"-SUB",
+				},
 			},
 		},
 		"public.\"Orders\"": {
@@ -269,6 +312,13 @@ func main() {
 				Type:    TextArrayColType,
 			},
 		},
+		"public.\"Redemptions\"": {
+			ColumnInfo{
+				Name:    "LicenseKey",
+				Persist: true,
+				Type:    TextColType,
+			},
+		},
 	}
 
 	filePath := os.Args[1]
@@ -283,6 +333,7 @@ func main() {
 		log.Fatalf("Faile to open file: %s", err.Error())
 	}
 
+	writer := bufio.NewWriter(os.Stdout)
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -292,11 +343,22 @@ func main() {
 	var currentTable = ""
 	var currentColumns []string
 	var persistedValues = make(map[string]string)
+	var line = ""
 
 	for scanner.Scan() {
-		line := scanner.Text()
+		line = scanner.Text()
+
+		if line == "\\." {
+			writer.Write([]byte(line))
+			writer.WriteByte('\n')
+			writer.Flush()
+			currentTable = ""
+			currentColumns = make([]string, 0)
+			continue
+		}
 
 		if len(line) == 0 || strings.HasPrefix(line, "--") {
+			writer.Flush()
 			currentTable = ""
 			currentColumns = make([]string, 0)
 			continue
@@ -323,7 +385,8 @@ func main() {
 			}
 		}
 
-		fmt.Printf("%s\n", statement)
+		writer.Write([]byte(statement))
+		writer.WriteByte('\n')
 		statement = ""
 	}
 }

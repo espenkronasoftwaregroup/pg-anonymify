@@ -157,3 +157,54 @@ func TestTextArrayColumn(t *testing.T) {
 	assert.Equal(t, "{", string([]rune(newValue)[0]))
 	assert.Equal(t, "}", string([]rune(newValue)[len(newValue)-1]))
 }
+
+func TestSanitizeStatement_WithSuffix(t *testing.T) {
+	var statement = "BG785VXY-TEEXCWMF-92V0PHMS-D8RSTGGY-6CJESGTE-96VXBG2D-NH3QS158-55WZA1YP-20240612-TRIAL\t507870\tkpeq\t\\N\t\\N\t\\N\t2024-06-12 01:54:58.820788+00\tf\tf\tf\tt\tf\tf\t\\N\t\\N\t\\N\t2024-06-02 01:54:58.824981+00\t2024-06-02 01:54:58.824981+00"
+	var columns = []ColumnInfo{
+		{
+			Name:    "Key",
+			Persist: true,
+			Type:    TextArrayColType,
+			Suffixes: &[]string{
+				"-TRIAL",
+				"-NFR",
+			},
+		},
+	}
+	var colNames = []string{"Key", "UserId", "ProductId", "OrderId", "LegacyOrderId", "SubscriptionId", "Expires", "Beta", "Nfr", "Revoked", "Trial", "LegacySubscription", "GiveAway", "FulfillmentReference", "TransferredTo", "TransferredFrom", "Created", "LastUpdated"}
+	var persistedValues = map[string]string{}
+
+	sanitizedStatement := SanitizeStatement(statement, &columns, colNames, persistedValues)
+
+	assert.Equal(t, -1, strings.Index(sanitizedStatement, "BG785VXY-TEEXCWMF-92V0PHMS-D8RSTGGY-6CJESGTE-96VXBG2D-NH3QS158-55WZA1YP-20240612-TRIAL"))
+
+	newVals := strings.Split(sanitizedStatement, "\t")
+
+	assert.True(t, strings.HasSuffix(newVals[0], "-TRIAL"))
+}
+
+func TestSanitizeStatement_PersistWithSuffix(t *testing.T) {
+	var statement = "BG785VXY-TEEXCWMF-92V0PHMS-D8RSTGGY-6CJESGTE-96VXBG2D-NH3QS158-55WZA1YP-20240612-TRIAL"
+	var columns = []ColumnInfo{
+		{
+			Name:    "Key",
+			Persist: true,
+			Type:    TextColType,
+			Suffixes: &[]string{
+				"-TRIAL",
+			},
+		},
+	}
+	var colNames = []string{"Key"}
+	var persistedValues = map[string]string{}
+
+	sanitizedStatement := SanitizeStatement(statement, &columns, colNames, persistedValues)
+
+	assert.NotEqual(t, sanitizedStatement, statement)
+	assert.True(t, strings.HasSuffix(sanitizedStatement, "-TRIAL"))
+
+	pv, p := persistedValues[statement]
+
+	assert.True(t, p)
+	assert.True(t, strings.HasSuffix(pv, "-TRIAL"))
+}
