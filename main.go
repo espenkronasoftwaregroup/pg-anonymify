@@ -172,6 +172,12 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 					}
 				}
 
+				// check for set to null
+				if info.SetNull {
+					newVal = "\\N"
+					break
+				}
+
 				valLen := len(val)
 				if info.MaxLength > 0 && valLen > info.MaxLength {
 					valLen = info.MaxLength
@@ -238,6 +244,7 @@ type ColumnInfo struct {
 	Suffixes  *[]string
 	Ignore    *[]string
 	MaxLength int
+	SetNull   bool
 }
 
 func main() {
@@ -279,6 +286,24 @@ func main() {
 					"CompanyName",
 					"AddressLine1",
 				},
+			},
+			ColumnInfo{
+				Name:    "PasswordHash",
+				Persist: false,
+				Type:    TextColType,
+				SetNull: true,
+			},
+			ColumnInfo{
+				Name:    "OldPasswordHash",
+				Persist: false,
+				Type:    TextColType,
+				SetNull: true,
+			},
+			ColumnInfo{
+				Name:    "Salt",
+				Persist: false,
+				Type:    TextColType,
+				SetNull: true,
 			},
 		},
 		"public.\"LicenseKeys\"": {

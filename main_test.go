@@ -228,3 +228,24 @@ func TestSanitizeStatement_Ignore(t *testing.T) {
 
 	assert.Equal(t, sanitizedStatement, statement)
 }
+
+func TestSanitizeStatement_SetNull(t *testing.T) {
+	var statement = "BG785VXY\t507870\tkpeq\t\\N\t\\N\t\\N\t2024-06-12 01:54:58.820788+00\tf\tf\tf\tt\tf\tf\t\\N\t\\N\t\\N\t2024-06-02 01:54:58.824981+00\t2024-06-02 01:54:58.824981+00"
+	var columns = []ColumnInfo{
+		{
+			Name:    "Key",
+			Persist: true,
+			Type:    TextColType,
+			SetNull: true,
+		},
+	}
+	var colNames = []string{"Key", "UserId", "ProductId", "OrderId", "LegacyOrderId", "SubscriptionId", "Expires", "Beta", "Nfr", "Revoked", "Trial", "LegacySubscription", "GiveAway", "FulfillmentReference", "TransferredTo", "TransferredFrom", "Created", "LastUpdated"}
+	var persistedValues = map[string]string{}
+
+	sanitizedStatement := SanitizeStatement(statement, &columns, colNames, persistedValues)
+
+	assert.NotEqual(t, sanitizedStatement, statement)
+
+	values := strings.Split(sanitizedStatement, "\t")
+	assert.Equal(t, "\\N", values[0])
+}
