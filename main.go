@@ -158,6 +158,20 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 		for _, info := range *columnInfos {
 			if info.Name == colName {
 
+				// check for values to ignore
+				if info.Ignore != nil && len(*info.Ignore) > 0 {
+					for _, i := range *info.Ignore {
+						if i == val {
+							newVal = val
+							break
+						}
+					}
+
+					if len(newVal) > 0 {
+						break
+					}
+				}
+
 				valLen := len(val)
 				if info.MaxLength > 0 && valLen > info.MaxLength {
 					valLen = info.MaxLength
@@ -222,11 +236,12 @@ type ColumnInfo struct {
 	Persist   bool
 	Keys      *[]string
 	Suffixes  *[]string
+	Ignore    *[]string
 	MaxLength int
 }
 
 func main() {
-	var colums = map[string][]ColumnInfo{
+	var columns = map[string][]ColumnInfo{
 		"public.\"EmailHistories\"": {
 			ColumnInfo{
 				Name:    "Email",
@@ -239,6 +254,9 @@ func main() {
 				Name:    "Email",
 				Persist: true,
 				Type:    EmailColType,
+				Ignore: &[]string{
+					"admin@kilohearts.com",
+				},
 			},
 			ColumnInfo{
 				Name:    "NewEmail",
@@ -378,7 +396,7 @@ func main() {
 			// this is an insert
 			tableName := GetTableNameFromStatement(currentTable)
 
-			columnInfos, ok := colums[tableName]
+			columnInfos, ok := columns[tableName]
 
 			if ok {
 				statement = SanitizeStatement(statement, &columnInfos, currentColumns, persistedValues)
