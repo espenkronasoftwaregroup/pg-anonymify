@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -141,7 +142,7 @@ func GetNewTextArrayValue(value string, persistValues bool, persistedValues map[
 // SanitizeStatement Sanitize values in a copy statement from a pg-dump.
 // Pass the statement, info about how and which column values should be replaced, names of the columns taken from the
 // first line of the copy statement and a map of previously persisted values.
-func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames []string, persistedValues map[string]string) string {
+func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames []string, persistedValues map[string]string) string {
 	columnValue := strings.Split(statement, "\t")
 	var result = make([]string, len(columnValue))
 
@@ -149,64 +150,61 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 		newVal := ""
 		colName := columnNames[i]
 
+		if tableConfig.IgnoreRows != nil {
+			ignoreValues, ok := tableConfig.IgnoreRows[colName]
+
+			if ok {
+				for _, ignore := range ignoreValues {
+					if val == ignore {
+						// if we find a value that says the row should be ignored, just return the unprocessed statement
+						return statement
+					}
+				}
+			}
+		}
+
 		// null columnValue can be ignored
 		if val == "\\N" {
 			result[i] = val
 			continue
 		}
 
-		for _, info := range *columnInfos {
-			if info.Name == colName {
+		colConfig, ok := tableConfig.Columns[colName]
 
-				// check for values to ignore
-				if info.Ignore != nil && len(*info.Ignore) > 0 {
-					for _, i := range *info.Ignore {
-						if i == val {
-							newVal = val
-							break
-						}
-					}
-
-					if len(newVal) > 0 {
-						break
-					}
-				}
-
-				// check for set to null
-				if info.SetNull {
-					newVal = "\\N"
-					break
-				}
+		if ok {
+			if colConfig.SetNull {
+				newVal = "\\N"
+			} else {
 
 				valLen := len(val)
-				if info.MaxLength > 0 && valLen > info.MaxLength {
-					valLen = info.MaxLength
+				if colConfig.MaxLength > 0 && valLen > colConfig.MaxLength {
+					valLen = colConfig.MaxLength
 				}
 
-				if info.Type == JsonColType {
-					newVal = GetNewJsonValue(val, info.Keys)
-				} else if info.Type == TextArrayColType {
-					newVal = GetNewTextArrayValue(val, info.Persist, persistedValues)
+				if colConfig.Type == JsonColType {
+					newVal = GetNewJsonValue(val, colConfig.Keys)
+				} else if colConfig.Type == TextArrayColType {
+					newVal = GetNewTextArrayValue(val, colConfig.Persist, persistedValues)
 				} else {
-					if info.Persist {
+					if colConfig.Persist {
 						persistedValue, persisted := persistedValues[val]
 						if persisted {
 							newVal = persistedValue
 						} else {
-							newVal = GetNewValue(info.Type == EmailColType, valLen)
+							newVal = GetNewValue(colConfig.Type == EmailColType, valLen)
 							persistedValues[val] = newVal
 						}
 					} else {
-						newVal = GetNewValue(info.Type == EmailColType, valLen)
+						newVal = GetNewValue(colConfig.Type == EmailColType, valLen)
 					}
 				}
 
 				// check if org value have a suffix that we want to keep
-				if info.Suffixes != nil && len(*info.Suffixes) > 0 {
-					for _, suffix := range *info.Suffixes {
+				if colConfig.Suffixes != nil && len(*colConfig.Suffixes) > 0 {
+					for _, suffix := range *colConfig.Suffixes {
 						if strings.HasSuffix(val, suffix) {
 							newVal = newVal[0:len(newVal)-len(suffix)] + suffix
-							if info.Persist {
+							if colConfig.Persist {
 								persistedValues[val] = newVal
 							}
 
@@ -214,8 +212,6 @@ func SanitizeStatement(statement string, columnInfos *[]ColumnInfo, columnNames 
 						}
 					}
 				}
-
-				break
 			}
 		}
 
@@ -236,132 +232,47 @@ const (
 	TextArrayColType string = "text_array"
 )
 
-type ColumnInfo struct {
-	Name      string
-	Type      string
-	Persist   bool
-	Keys      *[]string
-	Suffixes  *[]string
-	Ignore    *[]string
-	MaxLength int
-	SetNull   bool
+type ColumnConfig struct {
+	Persist   bool      `json:"persist"`
+	Type      string    `json:"type"`
+	MaxLength int       `json:"max_length"`
+	SetNull   bool      `json:"set_null"`
+	Suffixes  *[]string `json:"suffixes"`
+	Keys      *[]string `json:"keys"`
+}
+
+type TableConfig struct {
+	Columns    map[string]ColumnConfig `json:"columns"`
+	IgnoreRows map[string][]string     `json:"ignore_rows"`
+}
+
+func readJsonConfig(filename string) (map[string]TableConfig, error) {
+	file, err := os.Open(filename)
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer file.Close()
+
+	bytes, err := io.ReadAll(file)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var config map[string]TableConfig
+
+	err = json.Unmarshal(bytes, &config)
+
+	return config, err
 }
 
 func main() {
-	var columns = map[string][]ColumnInfo{
-		"public.\"EmailHistories\"": {
-			ColumnInfo{
-				Name:    "Email",
-				Persist: true,
-				Type:    EmailColType,
-			},
-		},
-		"public.\"Users\"": {
-			ColumnInfo{
-				Name:    "Email",
-				Persist: true,
-				Type:    EmailColType,
-				Ignore: &[]string{
-					"admin@kilohearts.com",
-				},
-			},
-			ColumnInfo{
-				Name:    "NewEmail",
-				Persist: true,
-				Type:    EmailColType,
-			},
-			ColumnInfo{
-				Name:      "ScreenName",
-				Persist:   false,
-				Type:      TextColType,
-				MaxLength: 64,
-			},
-			ColumnInfo{
-				Name:    "CompanyInfo",
-				Persist: false,
-				Type:    JsonColType,
-				Keys: &[]string{
-					"TaxId",
-					"PostalCode",
-					"CompanyName",
-					"AddressLine1",
-				},
-			},
-			ColumnInfo{
-				Name:    "PasswordHash",
-				Persist: false,
-				Type:    TextColType,
-				SetNull: true,
-			},
-			ColumnInfo{
-				Name:    "OldPasswordHash",
-				Persist: false,
-				Type:    TextColType,
-				SetNull: true,
-			},
-			ColumnInfo{
-				Name:    "Salt",
-				Persist: false,
-				Type:    TextColType,
-				SetNull: true,
-			},
-		},
-		"public.\"LicenseKeys\"": {
-			ColumnInfo{
-				Name:    "Key",
-				Persist: true,
-				Type:    TextColType,
-				Suffixes: &[]string{
-					"-TRIAL",
-					"-NFR",
-					"-BETA",
-					"-SUB",
-				},
-			},
-		},
-		"public.\"Orders\"": {
-			ColumnInfo{
-				Name:    "Email",
-				Persist: true,
-				Type:    EmailColType,
-			},
-			ColumnInfo{
-				Name:    "TaxId",
-				Persist: true,
-				Type:    TextColType,
-			},
-			ColumnInfo{
-				Name:    "RecipientEmail",
-				Persist: true,
-				Type:    EmailColType,
-			},
-		},
-		"public.\"Subscriptions\"": {
-			ColumnInfo{
-				Name:    "Email",
-				Persist: true,
-				Type:    EmailColType,
-			},
-			ColumnInfo{
-				Name:    "TaxId",
-				Persist: true,
-				Type:    TextColType,
-			},
-		},
-		"public.\"TransferRequests\"": {
-			ColumnInfo{
-				Name:    "Keys",
-				Persist: true,
-				Type:    TextArrayColType,
-			},
-		},
-		"public.\"Redemptions\"": {
-			ColumnInfo{
-				Name:    "LicenseKey",
-				Persist: true,
-				Type:    TextColType,
-			},
-		},
+	config, err := readJsonConfig("config.json")
+
+	if err != nil {
+		log.Fatalf("Failed to unmarshal config.json: %v", err)
 	}
 
 	filePath := os.Args[1]
@@ -421,10 +332,10 @@ func main() {
 			// this is an insert
 			tableName := GetTableNameFromStatement(currentTable)
 
-			columnInfos, ok := columns[tableName]
+			tableConfig, ok := config[tableName]
 
 			if ok {
-				statement = SanitizeStatement(statement, &columnInfos, currentColumns, persistedValues)
+				statement = SanitizeStatement(statement, &tableConfig, currentColumns, persistedValues)
 			}
 		}
 
