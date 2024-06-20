@@ -268,14 +268,21 @@ func readJsonConfig(filename string) (map[string]TableConfig, error) {
 	return config, err
 }
 
+var version string
+
 func main() {
+	filePath := os.Args[1]
+
+	if filePath == "version" {
+		fmt.Println("version: ", version)
+		os.Exit(0)
+	}
+
 	config, err := readJsonConfig("config.json")
 
 	if err != nil {
 		log.Fatalf("Failed to unmarshal config.json: %v", err)
 	}
-
-	filePath := os.Args[1]
 
 	if len(filePath) == 0 {
 		log.Fatal("First argument must be path to sql file")
