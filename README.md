@@ -28,6 +28,12 @@ Using this config the table public."Users" will have the column "Email"s values 
 Having created this file you can run the tool as such:
 ``./pg-anonymizer dump.sql > anonymized-dump.sql``
 
+## Options
+| Name    | Example                     | Description                                          |
+|---------|-----------------------------|------------------------------------------------------|
+| config  | -config=path/to/config.json | Path to config file to use. Defaults to "config.json" |
+
+
 ## Config reference
 
 ### Table level configuration
@@ -50,7 +56,6 @@ Having created this file you can run the tool as such:
 Due to value persisting big databases will use A LOT of memory when being processed. 
 
 ## To do
-- Specify config file path
 - Take dump from stdin
 - Reduce memory consumption
 - Output to specified file

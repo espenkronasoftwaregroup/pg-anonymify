@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -247,6 +248,7 @@ type TableConfig struct {
 }
 
 func readJsonConfig(filename string) (map[string]TableConfig, error) {
+
 	file, err := os.Open(filename)
 
 	if err != nil {
@@ -271,14 +273,16 @@ func readJsonConfig(filename string) (map[string]TableConfig, error) {
 var version string
 
 func main() {
-	filePath := os.Args[1]
+	filename := flag.String("config", "config.json", "Path to config json file")
+	flag.Parse()
+	filePath := flag.Arg(0)
 
 	if filePath == "version" {
 		fmt.Println("version: ", version)
 		os.Exit(0)
 	}
 
-	config, err := readJsonConfig("config.json")
+	config, err := readJsonConfig(*filename)
 
 	if err != nil {
 		log.Fatalf("Failed to unmarshal config.json: %v", err)
