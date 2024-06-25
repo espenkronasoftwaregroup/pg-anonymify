@@ -2,148 +2,169 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/crypto/sha3"
 	"io"
-	"log"
-	"math/rand"
 	"os"
 	"strings"
-	"time"
-	"unsafe"
 )
 
-func GetTableNameFromStatement(statement string) string {
+func GetTableNameFromStatement(statement string) (string, error) {
 	if !strings.HasPrefix(statement, "COPY ") {
-		log.Fatalf("statement not a copy statement")
+		return "", errors.New("statement not a copy statement")
 	}
 
 	substr := strings.Split(statement, " ")
 
-	return substr[1]
+	return substr[1], nil
 }
 
-func GetColumnNames(copyStatement string) []string {
+func GetColumnNames(copyStatement string) ([]string, error) {
 	result := make([]string, 0)
 	s := strings.Index(copyStatement, "(")
 	e := strings.Index(copyStatement, ")")
 
 	if s == -1 || e == -1 {
-		log.Fatalf("Unexpected copy statement: %s", copyStatement)
+		return []string{}, errors.New(fmt.Sprintf("unexpected copy statement: %s", copyStatement))
 	}
 
 	c := copyStatement[s+1 : e]
 	cs := strings.Split(c, ", ")
 
 	if len(cs) < 1 {
-		log.Fatalf("Could not split copy statement columns")
+		return []string{}, errors.New("could not split copy statement columns")
 	}
 
 	for _, val := range cs {
 		result = append(result, strings.Trim(val, "\""))
 	}
 
-	return result
+	return result, nil
 }
 
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-)
+var pepper = []byte("abc123")
+var N = []byte("untz")
+var hasher = sha3.NewCShake128(N, pepper)
 
-// https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-go
-var src = rand.NewSource(time.Now().UnixNano())
+func HashString(val string) (string, error) {
+	size := len(val) / 2
+	out := make([]byte, size)
+	_, err := hasher.Write([]byte(val))
 
-func GenerateRandomString(n int) string {
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = src.Int63(), letterIdxMax
-		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
+	if err != nil {
+		return "", err
 	}
 
-	return *(*string)(unsafe.Pointer(&b))
+	_, err = hasher.Read(out)
+
+	if err != nil {
+		return "", err
+	}
+
+	hasher.Reset()
+
+	return hex.EncodeToString(out), nil
 }
 
-func GetNewValue(isEmail bool, length int) string {
+func GetAnonymizedValue(val string, isEmail bool, maxLength int) (string, error) {
 	if isEmail {
-		return fmt.Sprintf("%s@%s.com", GenerateRandomString(7), GenerateRandomString(7))
+		parts := strings.Split(val, "@")
+
+		if len(parts) != 2 {
+			return "", errors.New(fmt.Sprintf("invalid email address: %s", val))
+		}
+
+		uname, e1 := HashString(parts[0])
+		domain, e2 := HashString(parts[1])
+
+		if e1 != nil {
+			return "", e1
+		}
+
+		if e2 != nil {
+			return "", e2
+		}
+
+		return fmt.Sprintf("%s@%s.com", uname, domain), nil
 	} else {
-		return GenerateRandomString(length)
+		h, err := HashString(val)
+
+		if err != nil {
+			return "", err
+		}
+
+		if len(h) > maxLength {
+			return h[:maxLength], nil
+		}
+
+		return h, nil
 	}
 }
 
-func GetNewJsonValue(value string, keys *[]string) string {
+func GetNewJsonValue(value string, keys *[]string) (string, error) {
 	if keys == nil || len(*keys) == 0 {
-		return "\\N"
+		return "\\N", nil
 	}
 
 	var anyJson map[string]interface{}
 	err := json.Unmarshal([]byte(value), &anyJson)
 
 	if err != nil {
-		log.Fatalf("Error parsing json: %v", err)
+		return "", nil
 	}
 
 	for _, key := range *keys {
 		_, ok := anyJson[key]
 
 		if ok {
-			anyJson[key] = GetNewValue(false, 10)
+			anyJson[key], err = GetAnonymizedValue(value, false, len(value))
+
+			if err != nil {
+				return "", err
+			}
 		}
 	}
 
 	bytes, err := json.Marshal(anyJson)
 
 	if err != nil {
-		log.Fatalf("Error serializing to json: %v", err)
+		return "", err
 	}
 
-	return string(bytes)
+	return string(bytes), nil
 }
 
-func GetNewTextArrayValue(value string, persistValues bool, persistedValues map[string]string) string {
+func GetNewTextArrayValue(value string) (string, error) {
 	val := strings.Trim(value, "{")
 	val = strings.Trim(val, "}")
 	vals := strings.Split(val, ",")
 	result := "{"
 
 	for _, v := range vals {
-		if persistValues {
-			x, ok := persistedValues[v]
+		res, err := GetAnonymizedValue(v, false, len(v))
 
-			if !ok {
-				x = GetNewValue(false, len(v))
-				persistedValues[v] = x
-			}
-
-			result += x + ","
-		} else {
-			result += GetNewValue(false, len(v))
-			result += ","
+		if err != nil {
+			return "", err
 		}
+
+		result += res
+		result += ","
 	}
 
 	result = strings.Trim(result, ",")
 	result += "}"
 
-	return result
+	return result, nil
 }
 
 // SanitizeStatement Sanitize values in a copy statement from a pg-dump.
 // Pass the statement, info about how and which column values should be replaced, names of the columns taken from the
 // first line of the copy statement and a map of previously persisted values.
-func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames []string, persistedValues map[string]string) string {
+func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames []string) (string, error) {
 	columnValue := strings.Split(statement, "\t")
 	var result = make([]string, len(columnValue))
 
@@ -158,7 +179,7 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 				for _, ignore := range ignoreValues {
 					if val == ignore {
 						// if we find a value that says the row should be ignored, just return the unprocessed statement
-						return statement
+						return statement, nil
 					}
 				}
 			}
@@ -182,22 +203,18 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 					valLen = colConfig.MaxLength
 				}
 
+				var err error
+
 				if colConfig.Type == JsonColType {
-					newVal = GetNewJsonValue(val, colConfig.Keys)
+					newVal, err = GetNewJsonValue(val, colConfig.Keys)
 				} else if colConfig.Type == TextArrayColType {
-					newVal = GetNewTextArrayValue(val, colConfig.Persist, persistedValues)
+					newVal, err = GetNewTextArrayValue(val)
 				} else {
-					if colConfig.Persist {
-						persistedValue, persisted := persistedValues[val]
-						if persisted {
-							newVal = persistedValue
-						} else {
-							newVal = GetNewValue(colConfig.Type == EmailColType, valLen)
-							persistedValues[val] = newVal
-						}
-					} else {
-						newVal = GetNewValue(colConfig.Type == EmailColType, valLen)
-					}
+					newVal, err = GetAnonymizedValue(val, colConfig.Type == EmailColType, valLen)
+				}
+
+				if err != nil {
+					return "", err
 				}
 
 				// check if org value have a suffix that we want to keep
@@ -205,10 +222,6 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 					for _, suffix := range *colConfig.Suffixes {
 						if strings.HasSuffix(val, suffix) {
 							newVal = newVal[0:len(newVal)-len(suffix)] + suffix
-							if colConfig.Persist {
-								persistedValues[val] = newVal
-							}
-
 							break
 						}
 					}
@@ -223,7 +236,7 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 		}
 	}
 
-	return strings.Join(result, "\t")
+	return strings.Join(result, "\t"), nil
 }
 
 const (
@@ -234,7 +247,6 @@ const (
 )
 
 type ColumnConfig struct {
-	Persist   bool      `json:"persist"`
 	Type      string    `json:"type"`
 	MaxLength int       `json:"max_length"`
 	SetNull   bool      `json:"set_null"`
@@ -285,17 +297,17 @@ func main() {
 	config, err := readJsonConfig(*filename)
 
 	if err != nil {
-		log.Fatalf("Failed to unmarshal config.json: %v", err)
+		panic(err)
 	}
 
 	if len(filePath) == 0 {
-		log.Fatal("First argument must be path to sql file")
+		panic("First argument must be path to sql file")
 	}
 
 	file, err := os.Open(filePath)
 
 	if err != nil {
-		log.Fatalf("Faile to open file: %s", err.Error())
+		panic(err)
 	}
 
 	writer := bufio.NewWriter(os.Stdout)
@@ -307,7 +319,6 @@ func main() {
 	var statement = ""
 	var currentTable = ""
 	var currentColumns []string
-	var persistedValues = make(map[string]string)
 	var line = ""
 
 	for scanner.Scan() {
@@ -336,22 +347,44 @@ func main() {
 			if len(currentTable) == 0 {
 				if strings.HasPrefix(statement, "COPY ") {
 					currentTable = statement
-					currentColumns = GetColumnNames(statement)
+					currentColumns, err = GetColumnNames(statement)
+
+					if err != nil {
+						panic(err)
+					}
 				}
 			}
 		} else if len(currentTable) > 0 {
 			// this is an insert
-			tableName := GetTableNameFromStatement(currentTable)
+			tableName, terr := GetTableNameFromStatement(currentTable)
+
+			if terr != nil {
+				panic(terr)
+			}
 
 			tableConfig, ok := config[tableName]
 
 			if ok {
-				statement = SanitizeStatement(statement, &tableConfig, currentColumns, persistedValues)
+				statement, err = SanitizeStatement(statement, &tableConfig, currentColumns)
+
+				if err != nil {
+					panic(err)
+				}
 			}
 		}
 
-		writer.Write([]byte(statement))
-		writer.WriteByte('\n')
+		_, err = writer.Write([]byte(statement))
+
+		if err != nil {
+			panic(err)
+		}
+
+		err = writer.WriteByte('\n')
+
+		if err != nil {
+			panic(err)
+		}
+
 		statement = ""
 	}
 }
