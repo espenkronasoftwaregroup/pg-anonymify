@@ -9,9 +9,34 @@ import (
 	"fmt"
 	"golang.org/x/crypto/sha3"
 	"io"
+	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 )
+
+const (
+	EmailColType     string = "email"
+	TextColType      string = "text"
+	JsonColType      string = "json"
+	TextArrayColType string = "text_array"
+)
+
+type ColumnConfig struct {
+	Type     string    `json:"type"`
+	SetNull  bool      `json:"set_null"`
+	Suffixes *[]string `json:"suffixes"`
+	Keys     *[]string `json:"keys"`
+}
+
+type TableConfig struct {
+	Columns    map[string]ColumnConfig `json:"columns"`
+	IgnoreRows map[string][]string     `json:"ignore_rows"`
+}
+
+var version string
+var pepper = []byte(strconv.FormatFloat(rand.Float64(), 'f', 7, 64))
+var hasher = sha3.NewCShake128([]byte{}, pepper)
 
 func GetTableNameFromStatement(statement string) (string, error) {
 	if !strings.HasPrefix(statement, "COPY ") {
@@ -46,13 +71,8 @@ func GetColumnNames(copyStatement string) ([]string, error) {
 	return result, nil
 }
 
-var pepper = []byte("abc123")
-var N = []byte("untz")
-var hasher = sha3.NewCShake128(N, pepper)
-
-func HashString(val string) (string, error) {
-	size := len(val) / 2
-	out := make([]byte, size)
+func hashString(val string, hashLength int) (string, error) {
+	out := make([]byte, hashLength)
 	_, err := hasher.Write([]byte(val))
 
 	if err != nil {
@@ -70,7 +90,7 @@ func HashString(val string) (string, error) {
 	return hex.EncodeToString(out), nil
 }
 
-func GetAnonymizedValue(val string, isEmail bool, maxLength int) (string, error) {
+func GetAnonymizedValue(val string, isEmail bool) (string, error) {
 	if isEmail {
 		parts := strings.Split(val, "@")
 
@@ -78,8 +98,22 @@ func GetAnonymizedValue(val string, isEmail bool, maxLength int) (string, error)
 			return "", errors.New(fmt.Sprintf("invalid email address: %s", val))
 		}
 
-		uname, e1 := HashString(parts[0])
-		domain, e2 := HashString(parts[1])
+		l := len([]rune(parts[0]))
+
+		if l < 6 {
+			l = 6
+		}
+
+		uname, e1 := hashString(parts[0], l)
+
+		d := []rune(parts[1])
+
+		if len(d) > 4 {
+			d = d[0 : len(d)-4]
+			d = append(d, '.', 'c', 'o', 'm')
+		}
+
+		domain, e2 := hashString(string(d), len(d))
 
 		if e1 != nil {
 			return "", e1
@@ -91,14 +125,10 @@ func GetAnonymizedValue(val string, isEmail bool, maxLength int) (string, error)
 
 		return fmt.Sprintf("%s@%s.com", uname, domain), nil
 	} else {
-		h, err := HashString(val)
+		h, err := hashString(val, len([]rune(val)))
 
 		if err != nil {
 			return "", err
-		}
-
-		if len(h) > maxLength {
-			return h[:maxLength], nil
 		}
 
 		return h, nil
@@ -121,7 +151,7 @@ func GetNewJsonValue(value string, keys *[]string) (string, error) {
 		_, ok := anyJson[key]
 
 		if ok {
-			anyJson[key], err = GetAnonymizedValue(value, false, len(value))
+			anyJson[key], err = GetAnonymizedValue(value, false)
 
 			if err != nil {
 				return "", err
@@ -145,7 +175,7 @@ func GetNewTextArrayValue(value string) (string, error) {
 	result := "{"
 
 	for _, v := range vals {
-		res, err := GetAnonymizedValue(v, false, len(v))
+		res, err := GetAnonymizedValue(v, false)
 
 		if err != nil {
 			return "", err
@@ -197,12 +227,6 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 			if colConfig.SetNull {
 				newVal = "\\N"
 			} else {
-
-				valLen := len(val)
-				if colConfig.MaxLength > 0 && valLen > colConfig.MaxLength {
-					valLen = colConfig.MaxLength
-				}
-
 				var err error
 
 				if colConfig.Type == JsonColType {
@@ -210,7 +234,7 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 				} else if colConfig.Type == TextArrayColType {
 					newVal, err = GetNewTextArrayValue(val)
 				} else {
-					newVal, err = GetAnonymizedValue(val, colConfig.Type == EmailColType, valLen)
+					newVal, err = GetAnonymizedValue(val, colConfig.Type == EmailColType)
 				}
 
 				if err != nil {
@@ -239,26 +263,6 @@ func SanitizeStatement(statement string, tableConfig *TableConfig, columnNames [
 	return strings.Join(result, "\t"), nil
 }
 
-const (
-	EmailColType     string = "email"
-	TextColType      string = "text"
-	JsonColType      string = "json"
-	TextArrayColType string = "text_array"
-)
-
-type ColumnConfig struct {
-	Type      string    `json:"type"`
-	MaxLength int       `json:"max_length"`
-	SetNull   bool      `json:"set_null"`
-	Suffixes  *[]string `json:"suffixes"`
-	Keys      *[]string `json:"keys"`
-}
-
-type TableConfig struct {
-	Columns    map[string]ColumnConfig `json:"columns"`
-	IgnoreRows map[string][]string     `json:"ignore_rows"`
-}
-
 func readJsonConfig(filename string) (map[string]TableConfig, error) {
 
 	file, err := os.Open(filename)
@@ -281,8 +285,6 @@ func readJsonConfig(filename string) (map[string]TableConfig, error) {
 
 	return config, err
 }
-
-var version string
 
 func main() {
 	filename := flag.String("config", "config.json", "Path to config json file")
@@ -325,16 +327,32 @@ func main() {
 		line = scanner.Text()
 
 		if line == "\\." {
-			writer.Write([]byte(line))
-			writer.WriteByte('\n')
-			writer.Flush()
+			_, err = writer.Write([]byte(line))
+			if err != nil {
+				panic(err)
+			}
+
+			err = writer.WriteByte('\n')
+			if err != nil {
+				panic(err)
+			}
+
+			err = writer.Flush()
+			if err != nil {
+				panic(err)
+			}
+
 			currentTable = ""
 			currentColumns = make([]string, 0)
 			continue
 		}
 
 		if len(line) == 0 || strings.HasPrefix(line, "--") {
-			writer.Flush()
+			err = writer.Flush()
+			if err != nil {
+				panic(err)
+			}
+
 			currentTable = ""
 			currentColumns = make([]string, 0)
 			continue
