@@ -87,7 +87,7 @@ func hashString(val string, hashLength int) (string, error) {
 
 	hasher.Reset()
 
-	return hex.EncodeToString(out), nil
+	return hex.EncodeToString(out)[0:hashLength], nil
 }
 
 func GetAnonymizedValue(val string, isEmail bool) (string, error) {
@@ -105,15 +105,7 @@ func GetAnonymizedValue(val string, isEmail bool) (string, error) {
 		}
 
 		uname, e1 := hashString(parts[0], l)
-
-		d := []rune(parts[1])
-
-		if len(d) > 4 {
-			d = d[0 : len(d)-4]
-			d = append(d, '.', 'c', 'o', 'm')
-		}
-
-		domain, e2 := hashString(string(d), len(d))
+		domain, e2 := hashString(parts[1], len([]rune(parts[1])))
 
 		if e1 != nil {
 			return "", e1
@@ -121,6 +113,10 @@ func GetAnonymizedValue(val string, isEmail bool) (string, error) {
 
 		if e2 != nil {
 			return "", e2
+		}
+
+		if len(domain) > 4 {
+			domain = domain[0 : len(domain)-4]
 		}
 
 		return fmt.Sprintf("%s@%s.com", uname, domain), nil

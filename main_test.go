@@ -71,6 +71,14 @@ func TestSanitizeStatement_PersistValues(t *testing.T) {
 	//assert.NotEqual(t, -1, strings.Index(sanitizedStatement2, persistedValues["abc123@somedomain.com"]))
 }
 
+func TestGetAnonymizedValue_LengthMustBeSame(t *testing.T) {
+	str := "testing@example.com'||dbms_pipe.receive_message(chr(98)||chr(98)||chr(98),15)||'"
+	val, err := GetAnonymizedValue(str, true)
+
+	assert.Nil(t, err)
+	assert.Equal(t, len([]rune(str)), len([]rune(val)))
+}
+
 func TestGetAnonymizedValue(t *testing.T) {
 	str := "ABCあいう"
 	assert.Equal(t, 12, len(str))
